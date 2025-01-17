@@ -1,1 +1,196 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.10.12","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"nvidiaTeslaT4","dataSources":[{"sourceId":9984336,"sourceType":"datasetVersion","datasetId":6144144},{"sourceId":10486080,"sourceType":"datasetVersion","datasetId":6492521},{"sourceId":10488292,"sourceType":"datasetVersion","datasetId":6493853},{"sourceId":10490575,"sourceType":"datasetVersion","datasetId":6495380},{"sourceId":10490972,"sourceType":"datasetVersion","datasetId":6495664},{"sourceId":10493379,"sourceType":"datasetVersion","datasetId":6496955},{"sourceId":10496935,"sourceType":"datasetVersion","datasetId":6499238}],"dockerImageVersionId":30840,"isInternetEnabled":true,"language":"python","sourceType":"script","isGpuEnabled":true}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:28:20.498377Z\",\"iopub.execute_input\":\"2025-01-17T12:28:20.498636Z\",\"iopub.status.idle\":\"2025-01-17T12:28:26.092693Z\",\"shell.execute_reply.started\":\"2025-01-17T12:28:20.498613Z\",\"shell.execute_reply\":\"2025-01-17T12:28:26.091778Z\"}}\nimport torch\nfrom torch import nn\nfrom tqdm.auto import tqdm\nfrom torch.autograd import grad\nimport torch.nn.functional as F\nfrom torchvision import transforms\nfrom torchvision.utils import make_grid\nfrom torchvision import datasets\nfrom torch.utils.data import DataLoader \nimport os\nimport matplotlib.pyplot as plt\nfrom tqdm.auto import tqdm\ntorch.manual_seed(0) \n\ndef show_tensor_images(image_tensor, num_images=25, size=(3, 64, 64), nrow=5):\n    image_tensor = (image_tensor + 1) / 2\n    image_unflat = image_tensor.detach().cpu()\n    image_grid = make_grid(image_unflat[:num_images], nrow=nrow)\n    plt.imshow(image_grid.permute(1, 2, 0).squeeze())\n    plt.show()\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:29:03.234022Z\",\"iopub.execute_input\":\"2025-01-17T12:29:03.234429Z\",\"iopub.status.idle\":\"2025-01-17T12:29:03.317504Z\",\"shell.execute_reply.started\":\"2025-01-17T12:29:03.234395Z\",\"shell.execute_reply\":\"2025-01-17T12:29:03.316520Z\"}}\ndisplay_step = 500\nz_dim = 64\nimg_channels = 3\nimg_size = 256\nbatch_size = 128\nlr = 0.0002\nlambda_gp = 10\nbeta_1 = 0.5 \nbeta_2 = 0.999\nepochs = 100\ndevice = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\nsave_dir = \"saved_models\"\nos.makedirs(save_dir, exist_ok=True)\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:29:03.526011Z\",\"iopub.execute_input\":\"2025-01-17T12:29:03.526288Z\",\"iopub.status.idle\":\"2025-01-17T12:29:03.530455Z\",\"shell.execute_reply.started\":\"2025-01-17T12:29:03.526265Z\",\"shell.execute_reply\":\"2025-01-17T12:29:03.529663Z\"}}\ndef get_noise(n_samples, z_dim, device='cpu'):\n    return torch.randn(n_samples, z_dim, device=device)\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:29:55.776097Z\",\"iopub.execute_input\":\"2025-01-17T12:29:55.776426Z\",\"iopub.status.idle\":\"2025-01-17T12:29:55.782960Z\",\"shell.execute_reply.started\":\"2025-01-17T12:29:55.776400Z\",\"shell.execute_reply\":\"2025-01-17T12:29:55.781942Z\"}}\nclass Generator(nn.Module):\n    def __init__(self, z_dim):\n        super().__init__()\n        self.z_dim=z_dim\n        self.model = nn.Sequential(\n            nn.ConvTranspose2d(z_dim, 1024, 4, 1, 0),\n            nn.BatchNorm2d(1024),\n            nn.ReLU(True),\n            nn.ConvTranspose2d(1024, 512, 4, 2, 1),\n            nn.BatchNorm2d(512),\n            nn.ReLU(True),\n            nn.ConvTranspose2d(512, 256, 4, 2, 1),\n            nn.BatchNorm2d(256),\n            nn.ReLU(True),\n            nn.ConvTranspose2d(256, 128, 4, 2, 1),\n            nn.BatchNorm2d(128),\n            nn.ReLU(True),\n            nn.ConvTranspose2d(128, 64, 4, 2, 1),\n            nn.BatchNorm2d(64),\n            nn.ReLU(True),\n            nn.ConvTranspose2d(64, img_channels, 4, 4, 0),\n            nn.Tanh()\n        )\n\n    def unsqueeze_noise(self, noise):\n        return noise.view(len(noise), self.z_dim, 1, 1)\n        \n    def forward(self, noise):\n        x = self.unsqueeze_noise(noise)\n        return self.model(x)\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:29:56.890675Z\",\"iopub.execute_input\":\"2025-01-17T12:29:56.890957Z\",\"iopub.status.idle\":\"2025-01-17T12:29:56.898174Z\",\"shell.execute_reply.started\":\"2025-01-17T12:29:56.890936Z\",\"shell.execute_reply\":\"2025-01-17T12:29:56.897287Z\"}}\nclass Discriminator(nn.Module):\n    def __init__(self):\n        super(Discriminator, self).__init__()\n        self.model = nn.Sequential(\n            nn.Conv2d(img_channels, 64, 4, 4, 0),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(64, 128, 4, 2, 1),\n            nn.BatchNorm2d(128),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(128, 256, 4, 2, 1),\n            nn.BatchNorm2d(256),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(256, 512, 4, 2, 1),\n            nn.BatchNorm2d(512),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(512, 1024, 4, 2, 1),\n            nn.BatchNorm2d(1024),\n            nn.LeakyReLU(0.2, inplace=True),\n            nn.Conv2d(1024, 1, 4, 1, 0),\n        )\n\n    def forward(self, x):\n        return self.model(x).view(-1, 1).squeeze(1)\n\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:29:57.977140Z\",\"iopub.execute_input\":\"2025-01-17T12:29:57.977461Z\",\"iopub.status.idle\":\"2025-01-17T12:29:58.469201Z\",\"shell.execute_reply.started\":\"2025-01-17T12:29:57.977436Z\",\"shell.execute_reply\":\"2025-01-17T12:29:58.468544Z\"}}\n\ngen = nn.DataParallel(Generator(z_dim).to(device))\ndisc = nn.DataParallel(Discriminator().to(device))\ngen_opt = torch.optim.Adam(gen.parameters(), lr=lr, betas=(beta_1, beta_2))\ndisc_opt = torch.optim.Adam(disc.parameters(), lr=lr, betas=(beta_1, beta_2))\ncriterion = nn.BCEWithLogitsLoss()\ndef weights_init(m):\n    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):\n        torch.nn.init.normal_(m.weight, 0.0, 0.02)\n    if isinstance(m, nn.BatchNorm2d):\n        torch.nn.init.normal_(m.weight, 0.0, 0.02)\n        torch.nn.init.constant_(m.bias, 0)\ngen = gen.apply(weights_init)\ndisc = disc.apply(weights_init)\ntransform = transforms.Compose([\n    transforms.Resize((img_size, img_size)),\n    transforms.ToTensor(),\n    transforms.Normalize([0.5], [0.5])\n])\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:29:59.005708Z\",\"iopub.execute_input\":\"2025-01-17T12:29:59.005982Z\",\"iopub.status.idle\":\"2025-01-17T12:29:59.010743Z\",\"shell.execute_reply.started\":\"2025-01-17T12:29:59.005963Z\",\"shell.execute_reply\":\"2025-01-17T12:29:59.010060Z\"}}\ndef gradient_penalty(critic, real, fake, device):\n    batch_size = real.shape[0]\n    epsilon = torch.rand(batch_size, 1, 1, 1, device=device, requires_grad=True)\n    mixed_images = epsilon * real + (1 - epsilon) * fake\n\n    mixed_scores = critic(mixed_images)\n\n    gradient = grad(\n        outputs=mixed_scores,\n        inputs=mixed_images,\n        grad_outputs = torch.ones_like(mixed_scores),\n        create_graph=True,\n        retain_graph=True\n    )[0]\n\n    gradient = gradient.view(gradient.shape[0], -1)\n    gradient_norm = gradient.norm(2, dim=1)\n    penalty = ((gradient_norm - 1)**2).mean()\n\n    return penalty\n    \n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:30:00.020876Z\",\"iopub.execute_input\":\"2025-01-17T12:30:00.021203Z\",\"iopub.status.idle\":\"2025-01-17T12:30:13.499613Z\",\"shell.execute_reply.started\":\"2025-01-17T12:30:00.021178Z\",\"shell.execute_reply\":\"2025-01-17T12:30:13.498976Z\"}}\ndataset = datasets.ImageFolder(root='/kaggle/input/minecraft-screenshots-dataset-with-features/screenshots', transform=transform)\ndataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:30:28.741592Z\",\"iopub.execute_input\":\"2025-01-17T12:30:28.741929Z\",\"iopub.status.idle\":\"2025-01-17T12:30:30.845159Z\",\"shell.execute_reply.started\":\"2025-01-17T12:30:28.741892Z\",\"shell.execute_reply\":\"2025-01-17T12:30:30.844320Z\"}}\nshow_tensor_images(gen(get_noise(25, z_dim, device=device)))\n\n# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-01-17T12:30:49.558132Z\",\"iopub.execute_input\":\"2025-01-17T12:30:49.558419Z\",\"execution_failed\":\"2025-01-17T12:31:40.378Z\"}}\nn_epochs = 100\ngen_loop = 5\ncur_step = 0\nmean_generator_loss = 0\nmean_discriminator_loss = 0\nfor epoch in range(n_epochs):\n    for real, _ in tqdm(dataloader):\n        cur_batch_size = len(real)\n        real = real.to(device)\n\n        disc_opt.zero_grad()\n        fake_noise = get_noise(cur_batch_size, z_dim, device=device)\n        fake = gen(fake_noise)\n        disc_fake_pred = disc(fake.detach()).mean()\n        disc_real_pred = disc(real).mean()\n        gp = gradient_penalty(disc, real, fake, device)\n\n        disc_loss = -(disc_real_pred - disc_fake_pred) + lambda_gp * gp\n        mean_discriminator_loss += disc_loss.item() / display_step\n        disc_loss.backward()\n        disc_opt.step()\n        gen_loss_track = 0\n        # for i in range(gen_loop):\n        gen_opt.zero_grad()\n        fake_noise_2 = get_noise(cur_batch_size, z_dim, device=device)\n        fake_2 = gen(fake_noise_2)\n        disc_fake_pred = disc(fake_2).mean()\n        gen_loss = -disc_fake_pred\n        gen_loss_track += gen_loss\n        gen_loss.backward()\n        gen_opt.step()\n\n        mean_generator_loss += gen_loss_track.item() / (display_step*gen_loop)\n\n        if cur_step % display_step == 0 and cur_step > 0:\n            print(f\"Epoch {epoch}, step {cur_step}: Generator loss: {mean_generator_loss}, discriminator loss: {mean_discriminator_loss}\")\n            show_tensor_images(fake)\n            show_tensor_images(real)\n            mean_generator_loss = 0\n            mean_discriminator_loss = 0\n            torch.cuda.empty_cache()\n        cur_step += 1\n        del fake, fake_2, disc_fake_pred, disc_real_pred, gp, disc_loss, gen_loss\n        if (epoch + 1) % 50 == 0:\n            torch.save(gen.state_dict(), os.path.join(save_dir, f\"generator_epoch_{epoch + 1}.pth\"))\n            torch.save(disc.state_dict(), os.path.join(save_dir, f\"discriminator_epoch_{epoch + 1}.pth\"))\n\n\n# %% [code]\ntorch.save(gen.state_dict(), os.path.join(save_dir, f\"generator_eoch_{epoch + 1}.pth\"))\ntorch.save(disc.state_dict(), os.path.join(save_dir, f\"discriminator_eoch_{epoch + 1}.pth\"))\n\n# %% [code]\n","metadata":{"_uuid":"d1bb2694-72db-45e6-b5d4-104893dfd033","_cell_guid":"0668eeca-828e-4c7d-891f-eceb0c4c5297","trusted":true,"collapsed":false,"jupyter":{"outputs_hidden":false}},"outputs":[],"execution_count":null}]}
+# -*- coding: utf-8 -*-
+"""aaaaaa.ipynb
+
+Automatically generated by Colab.
+
+Original file is located at
+    https://colab.research.google.com/drive/1cagI3Q5dczY24bBNVoHzh7MO4F2snNda
+"""
+
+import torch
+from torch import nn
+from tqdm.auto import tqdm
+from torch.autograd import grad
+import torch.nn.functional as F
+from torchvision import transforms
+from torchvision.utils import make_grid
+from torchvision import datasets
+from torch.utils.data import DataLoader
+import os
+import matplotlib.pyplot as plt
+from tqdm.auto import tqdm
+torch.manual_seed(0)
+
+def show_tensor_images(image_tensor, num_images=25, size=(3, 64, 64), nrow=5):
+    image_tensor = (image_tensor + 1) / 2
+    image_unflat = image_tensor.detach().cpu()
+    image_grid = make_grid(image_unflat[:num_images], nrow=nrow)
+    plt.imshow(image_grid.permute(1, 2, 0).squeeze())
+    plt.show()
+
+display_step = 500
+z_dim = 64
+img_channels = 3
+img_size = 256
+batch_size = 128
+lr = 0.0002
+lambda_gp = 10
+beta_1 = 0.5
+beta_2 = 0.999
+epochs = 100
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+save_dir = "saved_models"
+os.makedirs(save_dir, exist_ok=True)
+
+def get_noise(n_samples, z_dim, device='cpu'):
+    return torch.randn(n_samples, z_dim, device=device)
+
+class Generator(nn.Module):
+    def __init__(self, z_dim):
+        super().__init__()
+        self.z_dim=z_dim
+        self.model = nn.Sequential(
+            nn.ConvTranspose2d(z_dim, 1024, 4, 1, 0),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(1024, 512, 4, 2, 1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(512, 256, 4, 2, 1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(256, 128, 4, 2, 1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(64, img_channels, 4, 4, 0),
+            nn.Tanh()
+        )
+
+    def unsqueeze_noise(self, noise):
+        return noise.view(len(noise), self.z_dim, 1, 1)
+
+    def forward(self, noise):
+        x = self.unsqueeze_noise(noise)
+        return self.model(x)
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(img_channels, 64, 4, 4, 0),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(64, 128, 4, 2, 1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 256, 4, 2, 1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(256, 512, 4, 2, 1),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(512, 1024, 4, 2, 1),
+            nn.BatchNorm2d(1024),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(1024, 1, 4, 1, 0),
+        )
+
+    def forward(self, x):
+        return self.model(x).view(-1, 1).squeeze(1)
+
+gen = nn.DataParallel(Generator(z_dim).to(device))
+disc = nn.DataParallel(Discriminator().to(device))
+gen_opt = torch.optim.Adam(gen.parameters(), lr=lr, betas=(beta_1, beta_2))
+disc_opt = torch.optim.Adam(disc.parameters(), lr=lr, betas=(beta_1, beta_2))
+criterion = nn.BCEWithLogitsLoss()
+def weights_init(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        torch.nn.init.normal_(m.weight, 0.0, 0.02)
+    if isinstance(m, nn.BatchNorm2d):
+        torch.nn.init.normal_(m.weight, 0.0, 0.02)
+        torch.nn.init.constant_(m.bias, 0)
+gen = gen.apply(weights_init)
+disc = disc.apply(weights_init)
+transform = transforms.Compose([
+    transforms.Resize((img_size, img_size)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5], [0.5])
+])
+
+def gradient_penalty(critic, real, fake, device):
+    batch_size = real.shape[0]
+    epsilon = torch.rand(batch_size, 1, 1, 1, device=device, requires_grad=True)
+    mixed_images = epsilon * real + (1 - epsilon) * fake
+
+    mixed_scores = critic(mixed_images)
+
+    gradient = grad(
+        outputs=mixed_scores,
+        inputs=mixed_images,
+        grad_outputs = torch.ones_like(mixed_scores),
+        create_graph=True,
+        retain_graph=True
+    )[0]
+
+    gradient = gradient.view(gradient.shape[0], -1)
+    gradient_norm = gradient.norm(2, dim=1)
+    penalty = ((gradient_norm - 1)**2).mean()
+
+    return penalty
+
+dataset = datasets.ImageFolder(root='/kaggle/input/minecraft-screenshots-dataset-with-features/screenshots', transform=transform)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+
+show_tensor_images(gen(get_noise(25, z_dim, device=device)))
+
+n_epochs = 100
+gen_loop = 5
+cur_step = 0
+mean_generator_loss = 0
+mean_discriminator_loss = 0
+for epoch in range(n_epochs):
+    for real, _ in tqdm(dataloader):
+        cur_batch_size = len(real)
+        real = real.to(device)
+
+        disc_opt.zero_grad()
+        fake_noise = get_noise(cur_batch_size, z_dim, device=device)
+        fake = gen(fake_noise)
+        disc_fake_pred = disc(fake.detach()).mean()
+        disc_real_pred = disc(real).mean()
+        gp = gradient_penalty(disc, real, fake, device)
+
+        disc_loss = -(disc_real_pred - disc_fake_pred) + lambda_gp * gp
+        mean_discriminator_loss += disc_loss.item() / display_step
+        disc_loss.backward()
+        disc_opt.step()
+        gen_loss_track = 0
+        gen_opt.zero_grad()
+        fake_noise_2 = get_noise(cur_batch_size, z_dim, device=device)
+        fake_2 = gen(fake_noise_2)
+        disc_fake_pred = disc(fake_2).mean()
+        gen_loss = -disc_fake_pred
+        gen_loss_track += gen_loss
+        gen_loss.backward()
+        gen_opt.step()
+
+        mean_generator_loss += gen_loss_track.item() / (display_step*gen_loop)
+
+        if cur_step % display_step == 0 and cur_step > 0:
+            print(f"Epoch {epoch}, step {cur_step}: Generator loss: {mean_generator_loss}, discriminator loss: {mean_discriminator_loss}")
+            show_tensor_images(fake)
+            show_tensor_images(real)
+            mean_generator_loss = 0
+            mean_discriminator_loss = 0
+            torch.cuda.empty_cache()
+        cur_step += 1
+        del fake, fake_2, disc_fake_pred, disc_real_pred, gp, disc_loss, gen_loss
+        if (epoch + 1) % 50 == 0:
+            torch.save(gen.state_dict(), os.path.join(save_dir, f"generator_epoch_{epoch + 1}.pth"))
+            torch.save(disc.state_dict(), os.path.join(save_dir, f"discriminator_epoch_{epoch + 1}.pth"))
+
+torch.save(gen.state_dict(), os.path.join(save_dir, f"generator_eoch_{epoch + 1}.pth"))
+torch.save(disc.state_dict(), os.path.join(save_dir, f"discriminator_eoch_{epoch + 1}.pth"))
+
